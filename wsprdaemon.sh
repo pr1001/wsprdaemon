@@ -103,7 +103,9 @@ shopt -s -o nounset          ### bash stops with error if undeclared variable is
                                    ### 5) publishing graphs to graphs.wsprdaemon.org  no longer requires one to set up ssh auto-login.
                                    ### 6) added -Z, heck for and offer to kill zombies and add it to -z
 #declare -r VERSION=2.5             ### Release to public, same as 2.4j
-declare -r VERSION=2.5a             ### Enhance checks for zombies.  Add support for installation of WSJT-x on x86 machines
+#declare -r VERSION=2.5a             ### Enhance checks for zombies.  Add support for installation of WSJT-x on x86 machines
+declare -r VERSION=2.5b             ### Extend wait time to 30 seconds during schedule changes. Watchdog waits for GPS sync at startup and every 24 hours.
+                                    ### Prompt user before installing new SW.  Graphs now -165 to -115
 
 lc_numeric=$(locale | sed -n '/LC_NUMERIC/s/.*="*\([^"]*\)"*/\1/p')        ### There must be a better way, but locale sometimes embeds " in it output and this gets rid of them
 if [[ "${lc_numeric}" != "en_US.UTF-8" ]] && [[ "${lc_numeric}" != "en_GB.UTF-8" ]] && [[ "${lc_numeric}" != "C.UTF-8" ]] ; then
@@ -634,7 +636,7 @@ function validate_configuration_file()
         if [[ -z "${first_rx_grid}" ]]; then
             first_rx_grid=${rx_grid}
         fi
-        if [[ $verbosity -gt 0 ]] && [[ "${rx_grid}" != "${first_rx_grid}" ]]; then
+        if [[ $verbosity -gt 1 ]] && [[ "${rx_grid}" != "${first_rx_grid}" ]]; then
             echo "INFO: configuration file '${WSPRDAEMON_CONFIG_FILE}' contains 'RECEIVER_LIST[] configuration line '${rx_line_info_fields[@]}'"
             echo "       that specifies grid '${rx_grid}' which differs from the grid '${first_rx_grid}' of the first receiver"
         fi
@@ -671,16 +673,30 @@ declare -r NOISE_GRAPH_FILENAME=noise_graph.png
 declare -r SIGNAL_LEVELS_TMP_NOISE_GRAPH_FILE=/tmp/${NOISE_GRAPH_FILENAME}
 declare -r SIGNAL_LEVELS_WWW_NOISE_GRAPH_FILE=${SIGNAL_LEVELS_WWW_DIR}/${NOISE_GRAPH_FILENAME}
 
+function ask_user_to_install_sw() {
+    local prompt_string=$1
+    local is_requried_by_wd=${2:-}
+
+    echo ${prompt_string}
+    read -p "Do you want to proceed with the installation of that this software? [Yn] > "
+    REPLY=${REPLY:-Y}
+    REPLY=${REPLY:0:1}
+    if [[ ${REPLY^} != "Y" ]]; then
+        if [[ -n "${is_requried_by_wd}" ]]; then
+            echo "${is_requried_by_wd} is a software utility required by wsprdaemon and must be installed for it to run"
+        else
+            echo "WARNING: change wsprdaemon.conf to avoid installtion of this software"
+        fi
+        exit
+    fi
+}
+
 function check_for_needed_utilities()
 {
     ### TODO: Check for kiwirecorder only if there are kiwis receivers spec
     local apt_update_done="no"
     if ! dpkg -l | grep -wq bc ; then
-        # read -p "The Linux utility 'bc' is not installed on this Pi.  Do you want to run 'sudo apt-get install bc' to install it? [Y/n] > " 
-        # REPLY=${REPLY:-Y}     ### blank or no response change to 'Y'
-        # if [[ ${REPLY^} != "Y" ]]; then     ### Force REPLY to upper case
-        #    exit 1
-        # fi
+        ask_user_to_install_sw "The binary calculator 'bc' is not installed" "bc"
         [[ ${apt_update_done} == "no" ]] && sudo apt-get update && apt_update_done="yes"
         sudo apt-get install bc 
         local ret_code=$?
@@ -697,25 +713,25 @@ function check_for_needed_utilities()
             echo "   You should consider increasing its size by editing /etc/fstab and remounting /tmp/wspr-captures/"
         fi
         if ! dpkg -l | grep -wq sox  ; then
-            echo "SIGNAL_LEVEL_STATS=yes requires that the 'sox' sound processing utility be installed on this server"
+            ask_user_to_install_sw "SIGNAL_LEVEL_STATS=yes requires that the 'sox' sound processing utility be installed on this server"
             [[ ${apt_update_done} == "no" ]] && sudo apt-get update && apt_update_done="yes"
             sudo apt-get install sox 
         fi
         if [[ ${SIGNAL_LEVEL_LOCAL_GRAPHS-no} == "yes" ]] || [[ ${SIGNAL_LEVEL_UPLOAD_GRAPHS-no} == "yes" ]] ; then
             ### Get the Python packages needed to create the graphs.png
             if ! dpkg -l | grep -wq python3-matplotlib; then
-                echo "SIGNAL_LEVEL_LOCAL_GRAPHS=yes and/or SIGNAL_LEVEL_UPLOAD_GRAPHS=yes require that some Python libraries be added to this server"
+                ask_user_to_install_sw "SIGNAL_LEVEL_LOCAL_GRAPHS=yes and/or SIGNAL_LEVEL_UPLOAD_GRAPHS=yes require that some Python libraries be added to this server"
                 [[ ${apt_update_done} == "no" ]] && sudo apt-get update && apt_update_done="yes"
                 sudo apt-get install python3-matplotlib
             fi
             if ! dpkg -l | grep -wq python3-scipy; then
-                echo "SIGNAL_LEVEL_LOCAL_GRAPHS=yes and/or SIGNAL_LEVEL_UPLOAD_GRAPHS=yes require that some more Python libraries be added to this server"
+                ask_user_to_install_sw "SIGNAL_LEVEL_LOCAL_GRAPHS=yes and/or SIGNAL_LEVEL_UPLOAD_GRAPHS=yes require that some more Python libraries be added to this server"
                 [[ ${apt_update_done} == "no" ]] && sudo apt-get update && apt_update_done="yes"
                 sudo apt-get install python3-scipy
             fi
             if [[ ${SIGNAL_LEVEL_LOCAL_GRAPHS-no} == "yes" ]] ; then
                 if ! dpkg -l | grep -wq apache2 ; then
-                    echo "SIGNAL_LEVEL_LOCAL_GRAPHS=yes requires that the Apache web service be added to this server"
+                    ask_user_to_install_sw "SIGNAL_LEVEL_LOCAL_GRAPHS=yes requires that the Apache web service be added to this server"
                     [[ ${apt_update_done} == "no" ]] && sudo apt-get update && apt_update_done="yes"
                     sudo apt-get install apache2 -y --fix-missing
                     sudo mv ${SIGNAL_LEVELS_WWW_INDEX_FILE} ${SIGNAL_LEVELS_WWW_INDEX_FILE}.orig
@@ -734,6 +750,7 @@ EOF
             fi
             if [[ ${SIGNAL_LEVEL_UPLOAD_GRAPHS-no} == "yes" ]] ; then
                 if ! dpkg -l | grep -wq sshpass ; then
+                    ask_user_to_install_sw "SIGNAL_LEVEL_UPLOAD_GRAPHS=yes requires that 'sshpass' be added to this system"
                     [[ ${apt_update_done} == "no" ]] && sudo apt-get update && apt_update_done="yes"
                     sudo apt-get install sshpass
                 fi
@@ -773,11 +790,7 @@ if [[ ! -x ${WSPRD_CMD} ]]; then
             exit 1
             ;;
     esac
-    read -p "The 'wsprd' utility which is part of WSJT-x is not installed on this server.  Do you want to install WSJT-x to get 'wsprd'? [Y/n] > " 
-    REPLY=${REPLY:-Y}
-    if [[ "${REPLY^}" != "Y" ]]; then
-        exit 1
-    fi
+    ask_user_to_install_sw "The 'wsprd' utility which is part of WSJT-x is not installed on this server" "WSJT-x"
     sudo apt update
     sudo apt install libgfortran3 libqt5printsupport5 libqt5multimedia5-plugins libqt5serialport5 libqt5sql5-sqlite libfftw3-single3 
     wget http://physics.princeton.edu/pulsar/K1JT/${wsjtx_pkg}
@@ -1319,7 +1332,7 @@ function wait_for_all_stopping_recording_daemons() {
             fi
         fi
     done
-    [[ $verbosity -ge 1 ]] && echo "$(date): wait_for_all_stopping_recording_daemons() is waiting for: ${recording_stop_file_list[@]}"
+    [[ $verbosity -ge 1 ]] && echo "$(date): wait_for_all_stopping_recording_daemons() is done waiting for: ${recording_stop_file_list[@]}"
 }
 
 
@@ -2909,6 +2922,56 @@ function setup_expected_jobs_file () {
     fi
 }
 
+### If there are no GPS locks and it has been 24 hours since the last attempt to let the Kiwi get lock, stop all jobs for X seconds
+declare last_gps_lock_time="0"
+declare last_gps_check_time="0"
+declare last_gps_fixes_count="0"
+declare KIWI_GPS_LOCK_CHECK=${KIWI_GPS_LOCK_CHECK:=no}
+declare KIWI_GPS_LOCK_CHECK_INTERVAL=$((24 * 60 * 60))  ### Seconds between checks
+declare KIWI_GPS_STARUP_LOCK_WAIT_SECS=60               ### Wher first starting and the Kiwi reports no GPS lock, poll for lock this many seconds
+
+function let_kiwi_get_gps_lock() {
+    local kiwi_name=$1
+    local kiwi_ip=$(get_receiver_ip_from_name ${kiwi_name})
+    local kiwi_fix_count=$(curl ${kiwi_ip}/status 2> /dev/null awk -F = '/fixes=/{print $2}')
+    if [[ -z "${kiwi_fix_count}" ]];  then
+        [[ $verbosity -ge 1 ]] && echo "$(date): let_kiwi_get_gps_lock() WARNING failed to get gps fixes from Kiwi ${kiwi_ip}"
+        return
+    fi
+    local current_time=$(date +%s)
+    if [[ ${kiwi_fix_count} -gt ${kiwi_fix_count} ]]; then
+        ### Kiwi is GPS locked
+        last_gps_fixes_count=${kiwi_fix_count}
+        last_gps_lock_time=${current_time}
+        last_gps_check_time=${current_time}
+        [[ $verbosity -ge 1 ]] && echo "$(date): let_kiwi_get_gps_lock() Kiwi '${kiwi_name}' is locked"
+        return
+    fi
+    [[ ${KIWI_GPS_LOCK_CHECK} != "yes" ]] && return
+    if [[ ${last_gps_check_time} -eq 0 ]] && [[ ${kiwi_fix_count} -eq 0 ]] ; then
+        [[ $verbosity -ge 1 ]] && echo "$(date): let_kiwi_get_gps_lock() Kiwi '${kiwi_name}' has never been in GPS lock"
+        local timeout=${KIWI_GPS_STARUP_LOCK_WAIT_SECS}
+        local secs=0
+        while [[ ${secs} -lt ${timeout} ]]; do
+            kiwi_fix_count=$(curl ${kiwi_ip}/status 2> /dev/null awk -F = '/fixes=/{print $2}')
+            [[ $verbosity -ge 1 ]] && echo "$(date): let_kiwi_get_gps_lock() checking for first lock on '${kiwi_name}' which reports '${kiwi_fix_count}' fixes"
+            if [[ -n "${kiwi_fix_count}" ]] && [[ ${kiwi_fix_count} -gt 0 ]]; then
+                ### Kiwi is GPS locked
+                current_time=$(date +%s)
+                last_gps_fixes_count=${kiwi_fix_count}
+                last_gps_lock_time=${current_time}
+                [[ $verbosity -ge 1 ]] && echo "$(date): let_kiwi_get_gps_lock() Kiwi '${kiwi_name}' is locked for the first time"
+                return
+            fi
+            sleep 10   ## No GPS fix, so sleep for 10 seconds and check again
+            secs=$(( ${secs} + 10 ))
+        done
+        [[ $verbosity -ge 1 ]] && echo "$(date): let_kiwi_get_gps_lock() timeout waiting for first Kiwi ${kiwi_name}' to be locked"
+        return
+    fi
+    local out_of_lock_secs=$(( ${current_time} - ${last_gps_lock_time} ))
+}
+
 ### Read the expected.jobs and running.jobs files and terminate and/or add jobs so that they match
 function update_running_jobs_to_match_expected_jobs() {
     setup_expected_jobs_file
@@ -2956,7 +3019,7 @@ function update_running_jobs_to_match_expected_jobs() {
     if [[ ${schedule_change} == "yes" ]]; then
         ### A schedule change deleted a job.  Since it could be either a MERGED or REAL job, we can't be sure if there was a real job terminated.  
         ### So just wait 10 seconds for the 'running.stop' files to appear and then wait for all of them to go away
-        sleep 10
+        sleep ${STOPPING_MIN_WAIT_SECS:-30}            ### Wait a minimum of 30 seconds to be sure the Kiwi to terminates rx sessions 
         wait_for_all_stopping_recording_daemons
     fi
 
@@ -3171,7 +3234,7 @@ function setup_systemctl_deamon() {
     [Install]
     WantedBy=multi-user.target
 EOF
-   echo "Configuring this computer to run the watchdog daemon after reboot or power up.  Doing this requires root priviledge"
+   ask_user_to_install_sw "Configuring this computer to run the watchdog daemon after reboot or power up.  Doing this requires root priviledge" "wsprdaemon.service"
    sudo mv ${SYSTEMNCTL_UNIT_PATH##*/} ${SYSTEMNCTL_UNIT_PATH}    ### 'sudo cat > ${SYSTEMNCTL_UNIT_PATH} gave me permission errors
    sudo systemctl daemon-reload
    sudo systemctl enable wsprdaemon.service
